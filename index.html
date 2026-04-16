@@ -673,10 +673,53 @@ function generateClientId() {
 }
 
 function startNew_() {
+  // Reset currentStep so goTo works cleanly from any state
+  currentStep = 0;
+
+  // Clear all form fields
+  document.querySelectorAll('input[type=text], textarea').forEach(function(el){ el.value = ''; });
+  document.querySelectorAll('select').forEach(function(el){ el.selectedIndex = 0; });
+
+  // Reset children list to one blank block
+  var childList = document.getElementById('children-list');
+  if(childList) {
+    var blocks = childList.querySelectorAll('.item-block');
+    for(var i = blocks.length - 1; i >= 1; i--) blocks[i].remove();
+    childList.querySelectorAll('input,select').forEach(function(el){
+      el.value = '';
+      if(el.tagName === 'SELECT') el.selectedIndex = 0;
+    });
+  }
+  childCount = 1;
+
+  // Reset asset checklist UI
+  document.querySelectorAll('.checklist-item').forEach(function(el){
+    el.classList.remove('yes','no');
+    el.querySelectorAll('.toggle-btn').forEach(function(b){
+      b.classList.remove('yes-active','no-active');
+    });
+  });
+
+  // Clear asset tabs
+  var tabsEl = document.getElementById('asset-tabs');
+  var container = document.getElementById('asset-details-container');
+  if(tabsEl) tabsEl.innerHTML = '';
+  if(container) container.innerHTML = '';
+
+  // Reset all state variables
+  activeAssets = {};
+  assetCounts = {};
+  activeAssetTab = '';
+  window._lastSummaryData = null;
+  currentClientId = '';
+  document.getElementById('header-client-id').textContent = '';
+
+  // Generate fresh Client ID
   var id = generateClientId();
   document.getElementById('client-id-input').value = id;
   currentClientId = id;
   document.getElementById('header-client-id').textContent = 'Client: ' + id;
+
   goTo(1);
 }
 
@@ -918,29 +961,66 @@ function restoreData(d) {
 // NAVIGATION
 // ============================================================
 function goTo(n) {
-  document.getElementById('sec'+currentStep).classList.remove('active');
-  if(currentStep > 0) {
-    document.getElementById('ps'+currentStep).classList.remove('active');
-    document.getElementById('ps'+currentStep).classList.add('done');
-  } else {
-    document.getElementById('ps0').classList.remove('active');
+  // Hide all sections safely
+  for(var s=0; s<8; s++){
+    var sec = document.getElementById('sec'+s);
+    if(sec) sec.classList.remove('active');
   }
+  // Show target section
+  var target = document.getElementById('sec'+n);
+  if(target) target.classList.add('active');
+
   currentStep = n;
-  document.getElementById('sec'+n).classList.add('active');
+
+  // Update progress bar
   for(var i=0;i<8;i++){
     var el=document.getElementById('ps'+i);
     if(!el) continue;
-    if(i<n){el.classList.remove('active');el.classList.add('done');}
-    else if(i===n){el.classList.add('active');el.classList.remove('done');}
-    else{el.classList.remove('active');el.classList.remove('done');}
+    el.classList.remove('active','done');
+    if(i<n) el.classList.add('done');
+    else if(i===n) el.classList.add('active');
   }
   window.scrollTo({top:0,behavior:'smooth'});
 }
 
 function saveAndContinue(nextStep) {
-  var data = collectAllData();
-  if(nextStep === 4) buildAssetTabs();
-  saveClientData(data);
+  // Collect live data and merge with existing localStorage before saving
+  var liveData = collectAllData();
+  var stored = loadClientData(currentClientId) || {};
+
+  // Merge so no previously saved data is lost
+  if(stored.personal) Object.keys(stored.personal).forEach(function(k){ if(!liveData.personal[k]) liveData.personal[k] = stored.personal[k]; });
+  if(stored.family){
+    Object.keys(stored.family).forEach(function(k){ if(k!=='children' && !liveData.family[k]) liveData.family[k] = stored.family[k]; });
+    if(stored.family.children && (!liveData.family.children || !liveData.family.children.length)) liveData.family.children = stored.family.children;
+  }
+  if(stored.assetChecklist) Object.keys(stored.assetChecklist).forEach(function(k){ if(liveData.assetChecklist[k]===undefined) liveData.assetChecklist[k] = stored.assetChecklist[k]; });
+  if(stored.assetDetails) Object.keys(stored.assetDetails).forEach(function(type){ if(!liveData.assetDetails[type]||!liveData.assetDetails[type].length) liveData.assetDetails[type] = stored.assetDetails[type]; });
+  if(stored.executor) Object.keys(stored.executor).forEach(function(k){ if(!liveData.executor[k]) liveData.executor[k] = stored.executor[k]; });
+  if(stored.wishes) Object.keys(stored.wishes).forEach(function(k){ if(!liveData.wishes[k]) liveData.wishes[k] = stored.wishes[k]; });
+
+  saveClientData(liveData);
+
+  if(nextStep === 4) {
+    buildAssetTabs();
+    if(liveData.assetDetails) {
+      Object.keys(liveData.assetDetails).forEach(function(type){
+        if(!liveData.assetDetails[type]) return;
+        var listEl = document.getElementById('asset-list-'+type);
+        if(!listEl) return;
+        while(listEl.querySelectorAll('.item-block').length > 1) listEl.lastElementChild.remove();
+        if(!assetCounts[type]) assetCounts[type] = 1;
+        liveData.assetDetails[type].forEach(function(row, idx){
+          if(idx > 0) addAsset(type);
+          var blocks = listEl.querySelectorAll('.item-block');
+          var block = blocks[idx];
+          if(!block) return;
+          var inputs = block.querySelectorAll('input,textarea,select');
+          row.forEach(function(val, i){ if(inputs[i]) inputs[i].value = val; });
+        });
+      });
+    }
+  }
   goTo(nextStep);
 }
 
@@ -1124,18 +1204,74 @@ function addChild() {
 // ============================================================
 // SUMMARY
 // ============================================================
-function v(id){ var el=document.getElementById(id); return el?el.value.trim():''; }
+function v(id){
+  // On summary screen, read from saved snapshot for reliability
+  var snap = window._lastSummaryData;
+  if(snap) {
+    var maps = {
+      p_name:snap.personal&&snap.personal.p_name, p_age:snap.personal&&snap.personal.p_age,
+      p_dob:snap.personal&&snap.personal.p_dob, p_parent:snap.personal&&snap.personal.p_parent,
+      p_pan:snap.personal&&snap.personal.p_pan, p_aadhaar:snap.personal&&snap.personal.p_aadhaar,
+      p_address:snap.personal&&snap.personal.p_address, p_mobile:snap.personal&&snap.personal.p_mobile,
+      p_mobile2:snap.personal&&snap.personal.p_mobile2, p_email:snap.personal&&snap.personal.p_email,
+      f_marital:snap.family&&snap.family.f_marital, f_spouse:snap.family&&snap.family.f_spouse,
+      f_spouse_age:snap.family&&snap.family.f_spouse_age, f_spouse_pan:snap.family&&snap.family.f_spouse_pan,
+      f_dependants:snap.family&&snap.family.f_dependants, f_minors:snap.family&&snap.family.f_minors,
+      f_complications:snap.family&&snap.family.f_complications,
+      ex_name:snap.executor&&snap.executor.ex_name, ex_rel:snap.executor&&snap.executor.ex_rel,
+      ex_mobile:snap.executor&&snap.executor.ex_mobile, ex_pan:snap.executor&&snap.executor.ex_pan,
+      ex_address:snap.executor&&snap.executor.ex_address,
+      alt_name:snap.executor&&snap.executor.alt_name, alt_rel:snap.executor&&snap.executor.alt_rel,
+      alt_mobile:snap.executor&&snap.executor.alt_mobile, alt_pan:snap.executor&&snap.executor.alt_pan,
+      w1_name:snap.executor&&snap.executor.w1_name, w1_mobile:snap.executor&&snap.executor.w1_mobile,
+      w1_id:snap.executor&&snap.executor.w1_id, w1_address:snap.executor&&snap.executor.w1_address,
+      w2_name:snap.executor&&snap.executor.w2_name, w2_mobile:snap.executor&&snap.executor.w2_mobile,
+      w2_id:snap.executor&&snap.executor.w2_id, w2_address:snap.executor&&snap.executor.w2_address,
+      guardian_name:snap.executor&&snap.executor.guardian_name, guardian_rel:snap.executor&&snap.executor.guardian_rel,
+      guardian_mobile:snap.executor&&snap.executor.guardian_mobile,
+      sw_rites:snap.wishes&&snap.wishes.sw_rites, sw_care:snap.wishes&&snap.wishes.sw_care,
+      sw_charity:snap.wishes&&snap.wishes.sw_charity, sw_personal:snap.wishes&&snap.wishes.sw_personal,
+      sw_loans:snap.wishes&&snap.wishes.sw_loans, sw_receivable:snap.wishes&&snap.wishes.sw_receivable,
+      sw_other:snap.wishes&&snap.wishes.sw_other, sw_followup:snap.wishes&&snap.wishes.sw_followup
+    };
+    if(id in maps) return (maps[id]||'').trim();
+  }
+  var el=document.getElementById(id); return el?el.value.trim():'';
+}
 
 function showSummary() {
-  var data = collectAllData();
-  data.complete = true;
-  saveClientData(data);
+  // Step 1: save whatever is currently on screen (Step 6 - wishes)
+  var liveData = collectAllData();
+  liveData.complete = true;
+  saveClientData(liveData);
+
+  // Step 2: load the full saved record from localStorage (most complete source)
+  var stored = loadClientData(currentClientId) || {};
+
+  // Step 3: build final merged snapshot - localStorage wins, live data fills any gaps
+  var snap = {};
+  snap.personal       = mergeObj(stored.personal || {}, liveData.personal || {});
+  snap.family         = mergeObj(stored.family || {}, liveData.family || {});
+  snap.family.children= (stored.family && stored.family.children && stored.family.children.length)
+                          ? stored.family.children
+                          : (liveData.family && liveData.family.children) || [];
+  snap.assetChecklist = mergeObj(stored.assetChecklist || {}, liveData.assetChecklist || {});
+  snap.assetDetails   = mergeObj(stored.assetDetails || {}, liveData.assetDetails || {});
+  snap.executor       = mergeObj(stored.executor || {}, liveData.executor || {});
+  snap.wishes         = mergeObj(stored.wishes || {}, liveData.wishes || {});
+  snap.complete       = true;
+
+  // Step 4: re-save the merged complete snapshot
+  saveClientData(snap);
+
+  window._lastSummaryData = snap;
+  if(snap.assetChecklist) activeAssets = snap.assetChecklist;
+
   goTo(7);
 
   document.getElementById('summary-client-id').textContent = currentClientId;
   document.getElementById('summary-date').textContent = new Date().toLocaleDateString('en-IN',{weekday:'long',day:'2-digit',month:'long',year:'numeric'}) + ' — ' + new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'});
 
-  // Check setup
   var scriptUrl = localStorage.getItem('sarthi_script_url');
   document.getElementById('setup-banner').style.display = scriptUrl ? 'none' : 'block';
 
@@ -1145,18 +1281,44 @@ function showSummary() {
   buildFullSummary();
 }
 
+// Deep merge: base values kept, override fills only empty/missing keys
+function mergeObj(base, override) {
+  var result = {};
+  var allKeys = Object.keys(base).concat(Object.keys(override));
+  allKeys.forEach(function(k){
+    if(base[k] !== undefined && base[k] !== null && base[k] !== '') {
+      result[k] = base[k];
+    } else if(override[k] !== undefined && override[k] !== null && override[k] !== '') {
+      result[k] = override[k];
+    } else {
+      result[k] = base[k] !== undefined ? base[k] : override[k];
+    }
+  });
+  return result;
+}
+
 function buildScorecard() {
   var scorecard = document.getElementById('scorecard');
   scorecard.innerHTML = '';
+  var snap = window._lastSummaryData || {};
+  var snapAssets = snap.assetDetails || {};
+  var snapActiveAssets = snap.assetChecklist || activeAssets;
 
   var sections = [
     { name: 'Personal details', check: function(){ return v('p_name') && v('p_mobile'); } },
     { name: 'Family structure', check: function(){ return v('f_marital'); } },
-    { name: 'Asset checklist', check: function(){ return Object.keys(activeAssets).length > 0; } },
+    { name: 'Asset checklist', check: function(){ return Object.keys(snapActiveAssets).some(function(k){ return snapActiveAssets[k]; }); } },
     { name: 'Asset details', check: function(){
-      var yes = Object.keys(activeAssets).filter(function(k){ return activeAssets[k]; });
+      var yes = Object.keys(snapActiveAssets).filter(function(k){ return snapActiveAssets[k]; });
       if(yes.length === 0) return null;
       var filled = yes.filter(function(type){
+        // Check snapshot first
+        if(snapAssets[type] && snapAssets[type].length) {
+          return snapAssets[type].some(function(row){
+            return row.some(function(val){ return val && val.trim(); });
+          });
+        }
+        // fallback: live DOM
         var listEl = document.getElementById('asset-list-'+type);
         if(!listEl) return false;
         var inputs = listEl.querySelectorAll('input,textarea,select');
@@ -1207,14 +1369,25 @@ function buildPendingList() {
     }
   });
 
-  // Assets
-  var yesAssets = Object.keys(activeAssets).filter(function(k){ return activeAssets[k]; });
+  // Assets — read from snapshot
+  var pendSnap = window._lastSummaryData || {};
+  var pendSnapAssets = pendSnap.assetDetails || {};
+  var pendActiveAssets = pendSnap.assetChecklist || activeAssets;
+  var yesAssets = Object.keys(pendActiveAssets).filter(function(k){ return pendActiveAssets[k]; });
   yesAssets.forEach(function(type){
-    var listEl = document.getElementById('asset-list-'+type);
-    if(!listEl) { pending.push(ASSET_CONFIG[type].label + ' details not filled'); return; }
-    var inputs = listEl.querySelectorAll('input,textarea,select');
-    var anyFilled = Array.from(inputs).some(function(inp){ return inp.value.trim(); });
-    if(!anyFilled) pending.push(ASSET_CONFIG[type].label + ' — details not yet filled');
+    var hasFilled = false;
+    if(pendSnapAssets[type] && pendSnapAssets[type].length) {
+      hasFilled = pendSnapAssets[type].some(function(row){
+        return row.some(function(val){ return val && val.trim(); });
+      });
+    } else {
+      var listEl = document.getElementById('asset-list-'+type);
+      if(listEl) {
+        var inputs = listEl.querySelectorAll('input,textarea,select');
+        hasFilled = Array.from(inputs).some(function(inp){ return inp.value.trim(); });
+      }
+    }
+    if(!hasFilled) pending.push(ASSET_CONFIG[type].label + ' — details not yet filled');
   });
 
   // Executor
@@ -1256,13 +1429,24 @@ function buildWAMessage() {
     if(name && inp[4] && !inp[4].value.trim()) pending.push('PAN / Aadhaar of '+name);
   });
 
-  var yesAssets = Object.keys(activeAssets).filter(function(k){ return activeAssets[k]; });
+  var waSnap = window._lastSummaryData || {};
+  var waSnapAssets = waSnap.assetDetails || {};
+  var waActiveAssets = waSnap.assetChecklist || activeAssets;
+  var yesAssets = Object.keys(waActiveAssets).filter(function(k){ return waActiveAssets[k]; });
   yesAssets.forEach(function(type){
-    var listEl = document.getElementById('asset-list-'+type);
-    if(!listEl) { pending.push(ASSET_CONFIG[type].label+' documents'); return; }
-    var inputs = listEl.querySelectorAll('input,textarea,select');
-    var anyFilled = Array.from(inputs).some(function(inp){ return inp.value.trim(); });
-    if(!anyFilled) pending.push(ASSET_CONFIG[type].label+' documents / details');
+    var hasFilled = false;
+    if(waSnapAssets[type] && waSnapAssets[type].length) {
+      hasFilled = waSnapAssets[type].some(function(row){
+        return row.some(function(val){ return val && val.trim(); });
+      });
+    } else {
+      var listEl = document.getElementById('asset-list-'+type);
+      if(listEl) {
+        var inputs = listEl.querySelectorAll('input,textarea,select');
+        hasFilled = Array.from(inputs).some(function(inp){ return inp.value.trim(); });
+      }
+    }
+    if(!hasFilled) pending.push(ASSET_CONFIG[type].label+' documents / details');
   });
 
   if(v('sw_followup')) pending.push(v('sw_followup'));
@@ -1304,45 +1488,75 @@ function buildFullSummary() {
   ]);
 
   var famRows=[['Marital status',v('f_marital')],['Spouse name',v('f_spouse')],['Spouse age',v('f_spouse_age')],['Spouse PAN / Aadhaar',v('f_spouse_pan')]];
-  document.querySelectorAll('#children-list .item-block').forEach(function(c,i){
-    var inp=c.querySelectorAll('input,select');
-    var name=inp[0]?inp[0].value.trim():'';
-    if(name){
-      famRows.push(['Child '+(i+1),name+(inp[1]?' | Age: '+inp[1].value:'')+(inp[2]?' | '+inp[2].value:'')+(inp[6]?' | '+inp[6].value:'')]);
-      if(inp[4]&&inp[4].value) famRows.push(['Child '+(i+1)+' PAN/Aadhaar',inp[4].value]);
-      if(inp[5]&&inp[5].value) famRows.push(['Child '+(i+1)+' mobile',inp[5].value]);
-      if(inp[8]&&inp[8].value==='Yes'&&inp[9]&&inp[9].value) famRows.push(['Grandchildren via Child '+(i+1),inp[9].value]);
-    }
-  });
+  var sumSnap = window._lastSummaryData || {};
+  var snapChildren = (sumSnap.family && sumSnap.family.children) || [];
+  if(snapChildren.length) {
+    snapChildren.forEach(function(c,i){
+      if(!c.name) return;
+      famRows.push(['Child '+(i+1), c.name+(c.age?' | Age: '+c.age:'')+(c.type?' | '+c.type:'')+(c.resident?' | '+c.resident:'')]);
+      if(c.pan) famRows.push(['Child '+(i+1)+' PAN/Aadhaar', c.pan]);
+      if(c.mobile) famRows.push(['Child '+(i+1)+' mobile', c.mobile]);
+      if(c.grandchildren==='Yes'&&c.gc_names) famRows.push(['Grandchildren via Child '+(i+1), c.gc_names]);
+    });
+  } else {
+    document.querySelectorAll('#children-list .item-block').forEach(function(c,i){
+      var inp=c.querySelectorAll('input,select');
+      var name=inp[0]?inp[0].value.trim():'';
+      if(name){
+        famRows.push(['Child '+(i+1),name+(inp[1]?' | Age: '+inp[1].value:'')+(inp[2]?' | '+inp[2].value:'')+(inp[6]?' | '+inp[6].value:'')]);
+        if(inp[4]&&inp[4].value) famRows.push(['Child '+(i+1)+' PAN/Aadhaar',inp[4].value]);
+        if(inp[5]&&inp[5].value) famRows.push(['Child '+(i+1)+' mobile',inp[5].value]);
+        if(inp[8]&&inp[8].value==='Yes'&&inp[9]&&inp[9].value) famRows.push(['Grandchildren via Child '+(i+1),inp[9].value]);
+      }
+    });
+  }
   famRows.push(['Other dependants',v('f_dependants')],['Minor beneficiaries',v('f_minors')],['Family complications',v('f_complications')]);
   html += buildSection('Family Structure', famRows);
 
-  // Asset checklist summary
-  var yesAssets = Object.keys(activeAssets).filter(function(k){ return activeAssets[k]; }).map(function(k){ return ASSET_CONFIG[k]?ASSET_CONFIG[k].label:k; });
-  var noAssets = Object.keys(activeAssets).filter(function(k){ return !activeAssets[k]; }).map(function(k){ return ASSET_CONFIG[k]?ASSET_CONFIG[k].label:k; });
+  // Asset checklist summary — use snapshot
+  var sumActiveAssets = (sumSnap.assetChecklist) || activeAssets;
+  var yesAssets = Object.keys(sumActiveAssets).filter(function(k){ return sumActiveAssets[k]; }).map(function(k){ return ASSET_CONFIG[k]?ASSET_CONFIG[k].label:k; });
+  var noAssets = Object.keys(sumActiveAssets).filter(function(k){ return !sumActiveAssets[k]; }).map(function(k){ return ASSET_CONFIG[k]?ASSET_CONFIG[k].label:k; });
   html += buildSection('Asset Checklist',[
     ['Assets declared', yesAssets.join(', ') || '—'],
     ['Assets not held', noAssets.join(', ') || '—']
   ]);
 
-  // Asset details
+  // Asset details — read from saved snapshot, not live DOM
+  var savedData = window._lastSummaryData || {};
+  var savedAssetDetails = savedData.assetDetails || {};
   Object.keys(activeAssets).forEach(function(type){
     if(!activeAssets[type]) return;
     var config = ASSET_CONFIG[type];
     if(!config) return;
-    var listEl = document.getElementById('asset-list-'+type);
-    if(!listEl) return;
-    var blocks = listEl.querySelectorAll('.item-block');
+
+    // Try saved snapshot first, fall back to live DOM
     var blockRows = [];
-    blocks.forEach(function(b, idx){
-      var inp = b.querySelectorAll('input,textarea,select');
-      var hasData = false; var rows = [];
-      config.fields.forEach(function(f,fi){
-        var val = inp[fi]?inp[fi].value.trim():'';
-        if(val){ hasData=true; rows.push([f,val]); }
+    if(savedAssetDetails[type] && savedAssetDetails[type].length) {
+      savedAssetDetails[type].forEach(function(row, idx){
+        var hasData = false; var rows = [];
+        config.fields.forEach(function(f, fi){
+          var val = (row[fi] || '').trim();
+          if(val){ hasData = true; rows.push([f, val]); }
+        });
+        if(hasData) blockRows.push({num: idx+1, rows: rows});
       });
-      if(hasData) blockRows.push({num:idx+1, rows:rows});
-    });
+    } else {
+      // fallback: try live DOM
+      var listEl = document.getElementById('asset-list-'+type);
+      if(listEl) {
+        listEl.querySelectorAll('.item-block').forEach(function(b, idx){
+          var inp = b.querySelectorAll('input,textarea,select');
+          var hasData = false; var rows = [];
+          config.fields.forEach(function(f,fi){
+            var val = inp[fi]?inp[fi].value.trim():'';
+            if(val){ hasData=true; rows.push([f,val]); }
+          });
+          if(hasData) blockRows.push({num:idx+1, rows:rows});
+        });
+      }
+    }
+
     if(blockRows.length) {
       html += '<div class="summary-section" style="margin-bottom:14px;"><div class="summary-section-title">'+config.label+'</div><table class="summary-table">';
       blockRows.forEach(function(br){
@@ -1402,19 +1616,67 @@ function saveToSheet() {
   var d = collectAllData();
   var yesAssets = Object.keys(activeAssets).filter(function(k){ return activeAssets[k]; }).map(function(k){ return ASSET_CONFIG[k]?ASSET_CONFIG[k].label:k; });
 
+  // Build asset detail strings from saved snapshot
+  var snap = window._lastSummaryData || d;
+  var snapAssets = snap.assetDetails || {};
+
+  function formatAssetBlock(type) {
+    if(!snapAssets[type] || !snapAssets[type].length) return '';
+    var config = ASSET_CONFIG[type];
+    if(!config) return '';
+    return snapAssets[type].map(function(row, idx){
+      var parts = [];
+      config.fields.forEach(function(f, fi){
+        if(row[fi] && row[fi].trim()) parts.push(f+': '+row[fi].trim());
+      });
+      return parts.length ? '['+config.label+' '+(idx+1)+']
+'+parts.join('
+') : '';
+    }).filter(Boolean).join('
+
+');
+  }
+
+  // Build children string
+  var childrenStr = '';
+  if(snap.family && snap.family.children) {
+    childrenStr = snap.family.children.map(function(c){
+      if(!c.name) return '';
+      return c.name + (c.age?' (Age: '+c.age+')':'') + (c.type?' | '+c.type:'') + (c.pan?' | PAN: '+c.pan:'');
+    }).filter(Boolean).join('
+');
+  }
+
+  var noAssets = Object.keys(activeAssets).filter(function(k){ return !activeAssets[k]; }).map(function(k){ return ASSET_CONFIG[k]?ASSET_CONFIG[k].label:k; });
+
   var payload = {
-    client_id: currentClientId,
     interview_date: new Date().toLocaleDateString('en-IN',{day:'2-digit',month:'long',year:'numeric'}),
     interview_time: new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}),
     status: 'Interview Done',
+    client_id: currentClientId,
     full_name: v('p_name'), age: v('p_age'), dob: v('p_dob'), parent: v('p_parent'),
     pan: v('p_pan'), aadhaar: v('p_aadhaar'), address: v('p_address'),
     mobile: v('p_mobile'), mobile2: v('p_mobile2'), email: v('p_email'),
     marital: v('f_marital'), spouse: v('f_spouse'), spouse_age: v('f_spouse_age'), spouse_pan: v('f_spouse_pan'),
+    children: childrenStr,
+    dependants: v('f_dependants'), minors: v('f_minors'), complications: v('f_complications'),
     assets_declared: yesAssets.join(', '),
+    assets_not_held: noAssets.join(', '),
+    properties:     formatAssetBlock('property'),
+    fixed_deposits: formatAssetBlock('fd'),
+    bank_accounts:  formatAssetBlock('bank'),
+    mutual_funds:   formatAssetBlock('mf'),
+    vehicles:       formatAssetBlock('vehicle'),
+    pf:             formatAssetBlock('pf'),
+    gold:           formatAssetBlock('gold'),
+    other_assets:   formatAssetBlock('other'),
     executor: v('ex_name'), executor_rel: v('ex_rel'), executor_mobile: v('ex_mobile'),
-    alt_executor: v('alt_name'), witness1: v('w1_name'), witness2: v('w2_name'),
-    loans: v('sw_loans'), drafter_notes: v('sw_other'), followup: v('sw_followup')
+    alt_executor: v('alt_name'), alt_executor_rel: v('alt_rel'),
+    witness1: v('w1_name'), witness2: v('w2_name'), guardian: v('guardian_name'),
+    last_rites: v('sw_rites'), care_dependants: v('sw_care'),
+    charity: v('sw_charity'), personal_belongings: v('sw_personal'),
+    loans: v('sw_loans'), receivable: v('sw_receivable'),
+    drafter_notes: v('sw_other'), followup: v('sw_followup')
   };
 
   fetch(scriptUrl, {
@@ -1455,12 +1717,8 @@ function copySummary() {
 
 function startNew() {
   if(!confirm('Start a new interview? Current data is already saved.')) return;
-  document.querySelectorAll('input[type=text],textarea').forEach(function(el){el.value='';});
-  document.querySelectorAll('select').forEach(function(el){el.selectedIndex=0;});
-  activeAssets = {}; currentClientId = '';
-  document.getElementById('header-client-id').textContent = '';
-  childCount = 1;
   loadDashboard();
+  startNew_();
   goTo(0);
 }
 </script>
